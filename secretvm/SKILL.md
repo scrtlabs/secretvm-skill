@@ -1,6 +1,6 @@
 ---
 name: secretvm
-description: "Create and manage confidential SecretVMs on secretai.scrtlabs.com using secretvm-cli. Use when: create VM, launch confidential compute, deploy workload to SecretVM, manage SecretVMs, start confidential VM, secretvm."
+description: "Create and manage confidential SecretVMs on secretai.scrtlabs.com using secretvm-cli. Use when: create VM, launch confidential compute, deploy workload to SecretVM, manage SecretVMs, start confidential VM, verify attestation, secretvm."
 allowed-tools: Read, Write, Edit, Glob, Grep, Bash
 risk: unknown
 source: personal
@@ -29,6 +29,16 @@ npm install -g secretvm-cli
 ```
 
 Requires Node.js >= 16.
+
+Also install the verification SDK:
+
+```bash
+npm install -g secretvm-verify   # CLI + Node.js API
+# or
+pip install secretvm-verify       # Python API
+```
+
+Requires `openssl` on PATH and Node.js >= 18 (or Python >= 3.10).
 
 ### 2. Get an API key
 
@@ -186,44 +196,95 @@ secretvm-cli -k <API_KEY> vm remove <vm_id>
 
 Permanently deletes the VM and all its data.
 
-## Verification
+## Verification (secretvm-verify SDK)
 
-### Verify attestation quote
+Use the `secretvm-verify` SDK for all attestation verification. It provides a standalone CLI for quick checks and programmatic APIs (Node.js + Python) for embedding verification in code.
 
-Verify a VM's attestation quote directly:
-
-```bash
-secretvm-cli -k <API_KEY> verify quote --vm-id <vm_id>
-```
-
-Or verify from a file or hex string:
+### Quick verification (CLI)
 
 ```bash
-secretvm-cli -k <API_KEY> verify quote --quote-file <path>
-secretvm-cli -k <API_KEY> verify quote --quote <hex_string>
+secretvm-verify --secretvm <vm_domain>
 ```
 
-Optional: `--attestation-type <auto|tdx|sev>`, `--environment <production|preview>`, `--base-url <url>`.
+This performs end-to-end verification: CPU attestation, GPU attestation, and TLS binding.
 
-### Verify workload
+Additional CLI commands:
 
-Confirm that the running workload matches the expected docker-compose:
+| Command | Purpose |
+|---------|---------|
+| `secretvm-verify --secretvm <vm_domain>` | End-to-end: CPU + GPU attestation + TLS binding |
+| `secretvm-verify --tdx <quote_file>` | Verify standalone TDX quote |
+| `secretvm-verify --sev <quote_file>` | Verify standalone SEV-SNP quote |
+| `secretvm-verify --gpu <quote_file>` | Verify NVIDIA GPU attestation |
+| `secretvm-verify --resolve-version <quote_file>` | Look up SecretVM version from quote |
+| `secretvm-verify --verify-workload <quote_file> --compose <compose.yaml>` | Verify workload matches compose |
 
-```bash
-secretvm-cli -k <API_KEY> verify workload --vm-id <vm_id> -d <docker-compose.yaml>
+### Programmatic API (Node.js)
+
+```typescript
+import { checkSecretVm, checkCpuAttestation, verifyWorkload } from 'secretvm-verify';
+
+// End-to-end VM verification
+const result = await checkSecretVm('my-vm.vm.scrtlabs.com');
+console.log(result.valid);    // true if all checks pass
+console.log(result.checks);   // { tls_cert_obtained, cpu_attestation_valid, ... }
+
+// Standalone quote verification (auto-detects TDX vs SEV-SNP)
+const cpuResult = await checkCpuAttestation(quoteHexOrBase64);
+
+// Workload verification
+const workloadResult = await verifyWorkload(quoteData, composeYaml);
+console.log(workloadResult.status); // "authentic_match" | "authentic_mismatch" | "not_authentic"
 ```
 
-Optional: `--docker-files <path>` or `--docker-files-sha256 <sha>` for file hash verification.
+Key functions:
+- `checkSecretVm(url)` — end-to-end VM verification (connects to port 29343)
+- `checkCpuAttestation(data)` — auto-detect TDX (hex) or SEV-SNP (base64)
+- `checkTdxCpuAttestation(data)` — TDX-specific
+- `checkAmdCpuAttestation(data)` — SEV-SNP-specific
+- `checkNvidiaGpuAttestation(data)` — NVIDIA GPU via NRAS
+- `verifyWorkload(data, composeYaml)` — verify workload matches compose
+- `resolveSecretVmVersion(data)` — look up SecretVM version from quote
+- `formatWorkloadResult(result)` — human-readable workload result
 
-### Verify Proof of Cloud
+Result shape: `{ valid, attestationType, checks, report, errors }`
 
-Verify Proof of Cloud from a TDX quote:
+### Programmatic API (Python)
 
-```bash
-secretvm-cli -k <API_KEY> verify proof-of-cloud --vm-id <vm_id>
+```python
+from secretvm.verify import check_secret_vm, check_cpu_attestation, verify_workload, format_workload_result
+
+# End-to-end VM verification
+result = check_secret_vm("my-vm.vm.scrtlabs.com")
+print(result.valid)
+print(result.checks)
+
+# Standalone quote verification
+cpu_result = check_cpu_attestation(quote_data)
+
+# Workload verification
+workload_result = verify_workload(quote_data, compose_yaml)
+print(workload_result.status)  # "authentic_match" | "authentic_mismatch" | "not_authentic"
+print(format_workload_result(workload_result))
 ```
 
-Also aliased as `verify poc`.
+Key functions (same as Node.js, snake_case):
+- `check_secret_vm(url)`
+- `check_cpu_attestation(data)`
+- `check_tdx_cpu_attestation(data)`
+- `check_amd_cpu_attestation(data)`
+- `check_nvidia_gpu_attestation(data)`
+- `verify_workload(data, compose_yaml)`
+- `resolve_secretvm_version(data)`
+- `format_workload_result(result)`
+
+### Workload verification results
+
+| Status | Meaning |
+|--------|---------|
+| `authentic_match` | Quote from a known SecretVM, compose file matches |
+| `authentic_mismatch` | Quote from a known SecretVM, compose file does NOT match |
+| `not_authentic` | Quote is not from a known SecretVM image |
 
 ## EIP-8004 Registration
 
@@ -261,6 +322,6 @@ These flags are only used during VM creation.
 | Edit VM | `secretvm-cli -k <KEY> vm edit <ID> [options]` |
 | Remove VM | `secretvm-cli -k <KEY> vm remove <ID>` (**confirm first!**) |
 | Attestation | `secretvm-cli -k <KEY> vm attestation <ID>` |
-| Verify quote | `secretvm-cli -k <KEY> verify quote --vm-id <ID>` |
-| Verify workload | `secretvm-cli -k <KEY> verify workload --vm-id <ID> -d <COMPOSE>` |
-| Verify PoC | `secretvm-cli -k <KEY> verify proof-of-cloud --vm-id <ID>` |
+| Verify VM (e2e) | `secretvm-verify --secretvm <DOMAIN>` |
+| Verify quote | `secretvm-verify --tdx <FILE>` or `--sev <FILE>` |
+| Verify workload | `secretvm-verify --verify-workload <FILE> --compose <COMPOSE>` |
